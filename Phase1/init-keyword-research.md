@@ -1,25 +1,42 @@
 ---
 name: init-keyword-research
-description: "SEO Domination Engine Step 4: Keyword Research. Validates Steps 1-3b are complete, checks CDP connection, reads Step-4 Steps.md, generates batch seed keywords from previous deliverables, runs Google Keyword Planner batches via agent-browser, exports CSVs, loops until keyword target is met, consolidates all keywords into master CSV, shortlists best keywords, and writes summary.md. Must be run from inside Pillar-Content-Architecture/Content-Creation-Workflow/. Triggers: 'init keyword research', 'run keyword research', 'keyword research', 'step 4', 'keyword planner', 'run kp batches', 'start keyword research'."
+description: "SEO Domination Engine Step 4: Keyword Research. Validates Steps 1-3b are complete, checks CDP connection, reads Step-4 Steps.md, generates batch seed keywords from previous deliverables, runs Google Keyword Planner batches via agent-browser, exports CSVs, loops until keyword target is met, consolidates all keywords into master CSV, shortlists best keywords, and writes summary.md. Must be run from inside Pillar-Content-Architecture/. Triggers: 'init keyword research', 'run keyword research', 'keyword research', 'step 4', 'keyword planner', 'run kp batches', 'start keyword research'."
 ---
 
 # Init Keyword Research (Step 4)
 
 ## Prerequisites
 
-Must be run from inside `Pillar-Content-Architecture/Content-Creation-Workflow/`.
+Must be run from inside `Pillar-Content-Architecture/`.
 
 ---
 
 ## AUTOPILOT RULES — READ FIRST
 
+- **Sequential browser, single CDP.** Only one Chrome instance is connected via CDP. **Never** issue parallel `agent-browser` calls. Never spawn parallel subagents that touch the browser. Every batch (and every step within a batch) is serialised: one operation, await, next.
 - **Never stop or pause after Phase 0.** No questions to the user mid-run.
 - **Never skip a phase.** Complete every phase and sub-step in order.
-- **Loop batches in iterations.** Each iteration consists of 6–10 batches (minimum 6, maximum 10 per iteration — never exceed 10 in a single iteration). After completing an iteration, check if `total_keywords_to_research` is met. If not, start a new iteration of 6–10 batches with fresh seed keywords. Repeat iterations until the target is met. There is no cap on the number of iterations — only the per-iteration batch count is capped at 10.
-- **Self-heal on failure.** If a tool call fails, retry once silently. If it fails again, log inline and continue.
+- **State JSON is truth.** After every micro-step (each batch, each phase sub-section), update `.pipeline-state.json` with `stages.keyword_research.last_step = "<phase>.<substep>"` and `stages.keyword_research.batches_done = N`. Resume reads this. See "State JSON updates" below.
+- **Loop batches in iterations.** Each iteration consists of 6–10 batches (max 10). After each iteration, check if `total_keywords_to_research` is met. If not, start a new iteration. No cap on iterations.
+- **Self-heal on failure.** If a tool call fails, retry once silently. If it still fails, consult the `agent-browser` skill for fallback recovery before giving up. If recovery succeeds, continue. If browser-related and recovery fails → hard stop.
 - **agent-browser is the only hard stop.** If CDP fails at any point, tell the user: "agent-browser connection failed — cannot continue. Please check the CDP endpoint and try again." Then stop.
 - **Do not summarise phases.** Just do the work and mark todos complete.
-- **Snapshot first, screenshot second.** To understand page structure, content, or where to click — always use `agent-browser snapshot` (DOM snapshot) as the primary method. Only fall back to reading a screenshot if the snapshot does not provide enough information.
+- **Snapshot first, screenshot second.** Use `agent-browser snapshot` as primary; screenshot only if snapshot is insufficient.
+
+## State JSON updates (after every micro-step)
+
+After each numbered sub-step or each completed batch, run:
+
+```bash
+jq --arg step "<phase>.<substep>" --argjson n <batch_number> \
+   '.stages.keyword_research.last_step = $step
+    | .stages.keyword_research.batches_done = $n
+    | .stages.keyword_research.status = "in_progress"
+    | .updated_at = (now | todate)' \
+   .pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp .pipeline-state.json
+```
+
+On Phase 5.4 completion, set `status = "completed"`.
 
 ---
 
@@ -365,8 +382,10 @@ Read `config.json`. Do a full `{{PLACEHOLDER}}` replacement pass on `seo-dominat
 
 ### 5.4 Completion Marker
 
-After all of the above succeeds, write a marker so the orchestrator knows this skill finished:
+After all of the above succeeds, write the marker AND finalise state JSON:
 
 ```bash
 touch .keyword-research-done
+jq '.stages.keyword_research.status = "completed" | .stages.keyword_research.last_step = "5.4" | .updated_at = (now | todate)' \
+   .pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp .pipeline-state.json
 ```

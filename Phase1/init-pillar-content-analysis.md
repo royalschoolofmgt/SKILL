@@ -1,25 +1,38 @@
 ---
 name: init-pillar-content-analysis
-description: "SEO Domination Engine: Run the full content analysis workflow (Steps 1 to 3b) for a new client. Asks for client name, URL, and target market, updates config.json, checks CDP browser connection, builds a granular TodoList, then executes Steps 1, 2, 3, and 3b autonomously without stopping. Produces 4 deliverable MD files and updates seo-domination-report.html. Must be run from inside Pillar-Content-Architecture/Content-Creation-Workflow/. Triggers: 'init pillar content analysis', 'run pillar content analysis', 'start content analysis', 'run steps 1 to 3b', 'begin seo analysis', 'start seo workflow'."
+description: "SEO Domination Engine: Run the full content analysis workflow (Steps 1 to 3b) for a new client. Asks for client name, URL, and target market, updates config.json, checks CDP browser connection, builds a granular TodoList, then executes Steps 1, 2, 3, and 3b autonomously without stopping. Produces 4 deliverable MD files and updates seo-domination-report.html. Must be run from inside Pillar-Content-Architecture/. Triggers: 'init pillar content analysis', 'run pillar content analysis', 'start content analysis', 'run steps 1 to 3b', 'begin seo analysis', 'start seo workflow'."
 ---
 
 # Init Pillar Content Analysis
 
 ## Prerequisites
 
-This skill MUST be run from inside `Pillar-Content-Architecture/Content-Creation-Workflow/`. The `init-pillar-content-architecture` skill must have been run first to create this workspace.
+This skill MUST be run from inside `Pillar-Content-Architecture/`. The `init-pillar-content-architecture` skill must have been run first to create this workspace.
 
 ---
 
 ## AUTOPILOT RULES — READ FIRST
 
+- **Sequential browser, single CDP.** Only one Chrome instance is connected via CDP. **Never** issue parallel `agent-browser` calls. Never spawn parallel subagents that touch the browser. One operation at a time, await result, then next. This applies to every phase below.
 - **Never stop or pause after Phase 0.** Do not ask the user any questions mid-run.
 - **Never skip a phase.** Complete every phase and every sub-step in order.
 - **Validate before proceeding.** Before moving to the next step, confirm the deliverable file exists and is non-empty.
-- **Self-heal on failure.** If a tool call fails, retry once silently. If it fails again, log the error inline and continue with whatever data is available — except for agent-browser (see below).
+- **State JSON is truth.** After every micro-step (each numbered sub-section), update `.pipeline-state.json` with `stages.analysis.last_step = "<phase>.<substep>"`. The orchestrator reads this on resume. See "State JSON updates" below.
+- **Self-heal on failure.** If a tool call fails, retry once silently. If it fails again, consult the `agent-browser` skill for fallback recovery commands. If the recovery still fails and the failure is browser-related → hard stop. Otherwise log inline and continue.
 - **agent-browser is the only hard stop.** If the CDP connection fails or agent-browser cannot connect, tell the user: "agent-browser connection failed — cannot continue. Please check the CDP endpoint at https://chrome-cdp.vortexiq.ai and try again." Then stop.
 - **Do not summarise each phase.** Just do the work and mark todos complete.
-- **Snapshot first, screenshot second.** To understand page structure, content, or where to click — always use `agent-browser snapshot` (DOM snapshot) as the primary method. Only fall back to reading a screenshot if the snapshot does not provide enough information.
+- **Snapshot first, screenshot second.** Always use `agent-browser snapshot` (DOM snapshot) as the primary method to understand page structure. Fall back to a screenshot only if the snapshot is insufficient.
+
+## State JSON updates (after every micro-step)
+
+After completing each numbered sub-step, run:
+
+```bash
+jq --arg step "<phase>.<substep>" '.stages.analysis.last_step = $step | .stages.analysis.status = "in_progress" | .updated_at = (now | todate)' \
+   .pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp .pipeline-state.json
+```
+
+Replace `<phase>.<substep>` with e.g. `0.3`, `1.2`, `3.4b`. On Phase 5 completion, set `status = "completed"`.
 
 ---
 
@@ -230,10 +243,12 @@ Write the updated HTML back to `seo-domination-report.html`.
 
 ## PHASE 4b — Completion Marker
 
-After the HTML update succeeds, write a marker so the orchestrator knows this skill finished:
+After the HTML update succeeds, write a marker AND update state JSON:
 
 ```bash
 touch .analysis-done
+jq '.stages.analysis.status = "completed" | .stages.analysis.last_step = "4b" | .updated_at = (now | todate)' \
+   .pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp .pipeline-state.json
 ```
 
 ---
