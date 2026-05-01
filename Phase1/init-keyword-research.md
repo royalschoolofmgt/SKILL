@@ -16,8 +16,10 @@ Must be run from inside `Pillar-Content-Architecture/`.
 - **Sequential browser, single CDP.** Only one Chrome instance is connected via CDP. **Never** issue parallel `agent-browser` calls. Never spawn parallel subagents that touch the browser. Every batch (and every step within a batch) is serialised: one operation, await, next.
 - **Never stop or pause after Phase 0.** No questions to the user mid-run.
 - **Never skip a phase.** Complete every phase and sub-step in order.
-- **State JSON is truth.** After every micro-step (each batch, each phase sub-section), update `.pipeline-state.json` with `stages.keyword_research.last_step = "<phase>.<substep>"` and `stages.keyword_research.batches_done = N`. Resume reads this. See "State JSON updates" below.
-- **Loop batches in iterations.** Each iteration consists of 6–10 batches (max 10). After each iteration, check if `total_keywords_to_research` is met. If not, start a new iteration. No cap on iterations.
+- **State JSON is truth.** After every micro-step (each batch, each phase sub-section), update `pipeline-state.json` with `stages.keyword_research.last_step = "<phase>.<substep>"` and `stages.keyword_research.batches_done = N`. Resume reads this. See "State JSON updates" below.
+- **Hard cap: 20 batches total across the entire run.** Never exceed 20 KP batches no matter what `total_keywords_to_research` says. If 20 batches are done and the target is still unmet, stop the loop, log "BATCH_CAP_REACHED" in `pipeline-state.json`, proceed to Phase 4 with whatever was collected. This cap is non-negotiable.
+- **Loop batches in iterations.** Each iteration is 6–10 batches (max 10 per iteration). After each iteration, check the cap **and** the keyword target. Stop on whichever is hit first.
+- **Self-learning between iterations (calibration gate).** After every iteration (and after the very first 2–3 batches), score the harvest before launching the next iteration. If quality is poor, recalibrate seeds before continuing. See "PHASE 3d — Calibration Gate" below.
 - **Self-heal on failure.** If a tool call fails, retry once silently. If it still fails, consult the `agent-browser` skill for fallback recovery before giving up. If recovery succeeds, continue. If browser-related and recovery fails → hard stop.
 - **agent-browser is the only hard stop.** If CDP fails at any point, tell the user: "agent-browser connection failed — cannot continue. Please check the CDP endpoint and try again." Then stop.
 - **Do not summarise phases.** Just do the work and mark todos complete.
@@ -33,7 +35,7 @@ jq --arg step "<phase>.<substep>" --argjson n <batch_number> \
     | .stages.keyword_research.batches_done = $n
     | .stages.keyword_research.status = "in_progress"
     | .updated_at = (now | todate)' \
-   .pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp .pipeline-state.json
+   pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp pipeline-state.json
 ```
 
 On Phase 5.4 completion, set `status = "completed"`.
@@ -295,13 +297,107 @@ After each batch CSV is saved:
 
 ## PHASE 3c — Generate New Batch If Needed
 
-If the target is not met:
-1. Generate a new batch of 2–3 seed keywords — use different seeds than previous batches, targeting unexplored pillars or product categories
-2. Increment the batch number
-3. Return to Phase 3 and run the new batch
-4. Repeat Phase 3b quality check
+Before generating any new batch, check the **hard cap**:
 
-Continue looping until `total_keywords_to_research` is met with satisfactory keywords.
+```bash
+BATCHES_DONE=$(jq -r '.stages.keyword_research.batches_done' pipeline-state.json)
+if [ "$BATCHES_DONE" -ge 20 ]; then
+  jq '.stages.keyword_research.last_step = "BATCH_CAP_REACHED"' \
+     pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp pipeline-state.json
+  echo "Hard cap of 20 batches reached. Proceeding to Phase 4 with collected data."
+  # Skip directly to PHASE 4
+fi
+```
+
+If `BATCHES_DONE < 20` AND target not met:
+1. Generate a new batch of 2–3 seed keywords — use different seeds than previous batches, targeting unexplored pillars or product categories.
+2. Increment the batch number.
+3. Return to Phase 3 and run the new batch.
+4. Repeat Phase 3b quality check.
+
+Continue until **either** `total_keywords_to_research` is met **or** `batches_done == 20` (whichever comes first).
+
+---
+
+## PHASE 3d — Calibration Gate (self-learning)
+
+Run this gate after **batch 3** (initial calibration) and after **every iteration** (every 6–10 batches). Purpose: detect if the seed keywords are off-target before wasting more batches.
+
+### 3d.1 Score the harvest so far
+
+Compute these signals from all batch CSVs collected so far:
+
+```bash
+# Concatenate all batch CSVs (skipping headers)
+ALL=$(tail -q -n +2 Step-4-Keyword-Research/batches/batch-*.csv 2>/dev/null)
+
+# 1. Total keywords
+TOTAL=$(echo "$ALL" | wc -l)
+
+# 2. Zero-volume rate (keywords with avg_monthly_searches = 0)
+ZERO=$(echo "$ALL" | awk -F, '$3==0 || $3=="" {n++} END {print n+0}')
+ZERO_RATE=$(awk -v z="$ZERO" -v t="$TOTAL" 'BEGIN {if (t>0) print z/t; else print 1}')
+
+# 3. High-competition rate
+HIGH=$(echo "$ALL" | awk -F, 'tolower($5)=="high" {n++} END {print n+0}')
+HIGH_RATE=$(awk -v h="$HIGH" -v t="$TOTAL" 'BEGIN {if (t>0) print h/t; else print 0}')
+
+# 4. Median avg_monthly_searches
+MEDIAN=$(echo "$ALL" | awk -F, '$3>0 {print $3}' | sort -n | awk '{a[NR]=$1} END {if (NR==0) print 0; else if (NR%2==1) print a[(NR+1)/2]; else print (a[NR/2]+a[NR/2+1])/2}')
+
+# 5. Relevance density — what fraction of keywords contain a brand/product term from the seed pool
+SEEDS=$(jq -r '.seed_keywords_used[]?' pipeline-state.json | tr '\n' '|' | sed 's/|$//')
+if [ -n "$SEEDS" ]; then
+  RELEVANT=$(echo "$ALL" | awk -F, -v p="$SEEDS" 'BEGIN{IGNORECASE=1} tolower($2) ~ tolower(p) {n++} END{print n+0}')
+  RELEVANCE=$(awk -v r="$RELEVANT" -v t="$TOTAL" 'BEGIN {if (t>0) print r/t; else print 0}')
+else
+  RELEVANCE=1
+fi
+```
+
+### 3d.2 Apply pass/fail thresholds
+
+| Signal | Pass | Soft fail (recalibrate) | Hard fail (stop) |
+|---|---|---|---|
+| Zero-volume rate | < 0.40 | 0.40–0.70 | > 0.70 |
+| High-competition rate | < 0.60 | 0.60–0.85 | > 0.85 |
+| Median volume | ≥ 100 | 30–100 | < 30 |
+| Relevance density | ≥ 0.50 | 0.20–0.50 | < 0.20 |
+
+- **All four pass** → continue to next iteration with the existing seed strategy.
+- **Any soft fail** → recalibrate (3d.3) before next iteration.
+- **Any hard fail twice in a row** → stop the loop, log `CALIBRATION_HARD_FAIL` in state JSON, proceed to Phase 4 with what's been collected. (Hard cap of 20 still applies regardless.)
+
+### 3d.3 Recalibration (when soft-failing)
+
+Persist the current scores and seeds into `pipeline-state.json`, then **change** the seed strategy for the next iteration based on which signal failed:
+
+```bash
+jq --argjson scores "{\"zero_rate\":$ZERO_RATE,\"high_rate\":$HIGH_RATE,\"median\":$MEDIAN,\"relevance\":$RELEVANCE}" \
+   --argjson n "$TOTAL" \
+   '.stages.keyword_research.calibration = (.stages.keyword_research.calibration // []) + [{
+      after_batch: .stages.keyword_research.batches_done,
+      total_keywords: $n,
+      scores: $scores,
+      timestamp: (now | todate)
+    }]' \
+   pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp pipeline-state.json
+```
+
+Recalibration rules (apply all that match):
+
+| Failed signal | Recalibration action |
+|---|---|
+| **High zero-volume rate** | Drop overly-niche or branded seeds. Replace with broader, head-term seeds from the pillar (e.g. "vape kits" instead of "<brand-name> starter pen"). |
+| **High competition rate** | Switch to long-tail modifiers: prepend "best", "for beginners", "under £50", "guide", "vs", "review". Avoid generic head terms. |
+| **Low median volume** | Pivot to category-level head terms with informational intent ("how to", "what is"). |
+| **Low relevance density** | The KP is suggesting off-topic neighbours. Tighten seeds to use 2–3 word phrases that include a product noun + qualifier; avoid single-word seeds. Re-read `Step-1-Brand-Discovery/brand-discovery.md` and `Step-3-Content-Gap-Analysis/content-gap-analysis.md` to anchor the next seeds in confirmed brand vocabulary. |
+
+After recalibration, update `seed_keywords_used` in state JSON with the new seeds, then start the next iteration (still subject to the 20-batch cap).
+
+### 3d.4 First-pass calibration after batch 3
+
+After exactly the **third** batch (regardless of whether an iteration is "done"), run 3d.1 and 3d.2 once. This is the early warning — it catches catastrophically wrong seed direction before a whole iteration is wasted. Apply the same pass/recalibrate/stop logic.
 
 ---
 
@@ -387,5 +483,5 @@ After all of the above succeeds, write the marker AND finalise state JSON:
 ```bash
 touch .keyword-research-done
 jq '.stages.keyword_research.status = "completed" | .stages.keyword_research.last_step = "5.4" | .updated_at = (now | todate)' \
-   .pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp .pipeline-state.json
+   pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp pipeline-state.json
 ```

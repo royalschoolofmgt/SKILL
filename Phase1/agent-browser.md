@@ -166,14 +166,14 @@ When `agent-browser` returns a non-zero exit, parse the error and apply the matc
 
 Hard stop and surface to the user only when **all** apply:
 - A and at least one of B/C have been tried and failed.
-- The same micro-step has failed twice in a row according to `.pipeline-state.json`.
+- The same micro-step has failed twice in a row according to `pipeline-state.json`.
 - Doctor (`agent-browser doctor`) reports an issue.
 
 Use this exact message:
 
 ```
 agent-browser connection failed — cannot continue. Please check the CDP endpoint and try again.
-Last attempted step: <stages.<X>.last_step from .pipeline-state.json>
+Last attempted step: <stages.<X>.last_step from pipeline-state.json>
 ```
 
 Then stop. Do not retry further. Do not delete partial deliverables. The orchestrator will resume from the last recorded step on next invocation.

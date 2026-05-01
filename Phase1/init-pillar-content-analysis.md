@@ -17,7 +17,7 @@ This skill MUST be run from inside `Pillar-Content-Architecture/`. The `init-pil
 - **Never stop or pause after Phase 0.** Do not ask the user any questions mid-run.
 - **Never skip a phase.** Complete every phase and every sub-step in order.
 - **Validate before proceeding.** Before moving to the next step, confirm the deliverable file exists and is non-empty.
-- **State JSON is truth.** After every micro-step (each numbered sub-section), update `.pipeline-state.json` with `stages.analysis.last_step = "<phase>.<substep>"`. The orchestrator reads this on resume. See "State JSON updates" below.
+- **State JSON is truth.** After every micro-step (each numbered sub-section), update `pipeline-state.json` with `stages.analysis.last_step = "<phase>.<substep>"`. The orchestrator reads this on resume. See "State JSON updates" below.
 - **Self-heal on failure.** If a tool call fails, retry once silently. If it fails again, consult the `agent-browser` skill for fallback recovery commands. If the recovery still fails and the failure is browser-related → hard stop. Otherwise log inline and continue.
 - **agent-browser is the only hard stop.** If the CDP connection fails or agent-browser cannot connect, tell the user: "agent-browser connection failed — cannot continue. Please check the CDP endpoint at https://chrome-cdp.vortexiq.ai and try again." Then stop.
 - **Do not summarise each phase.** Just do the work and mark todos complete.
@@ -29,7 +29,7 @@ After completing each numbered sub-step, run:
 
 ```bash
 jq --arg step "<phase>.<substep>" '.stages.analysis.last_step = $step | .stages.analysis.status = "in_progress" | .updated_at = (now | todate)' \
-   .pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp .pipeline-state.json
+   pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp pipeline-state.json
 ```
 
 Replace `<phase>.<substep>` with e.g. `0.3`, `1.2`, `3.4b`. On Phase 5 completion, set `status = "completed"`.
@@ -248,7 +248,7 @@ After the HTML update succeeds, write a marker AND update state JSON:
 ```bash
 touch .analysis-done
 jq '.stages.analysis.status = "completed" | .stages.analysis.last_step = "4b" | .updated_at = (now | todate)' \
-   .pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp .pipeline-state.json
+   pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp pipeline-state.json
 ```
 
 ---

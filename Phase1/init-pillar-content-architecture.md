@@ -30,9 +30,9 @@ If `Pillar-Content-Architecture/config.json` already exists, the workspace is al
 ```bash
 if [ -f "Pillar-Content-Architecture/config.json" ]; then
   touch "Pillar-Content-Architecture/.architecture-done"
-  if [ -f "Pillar-Content-Architecture/.pipeline-state.json" ]; then
+  if [ -f "Pillar-Content-Architecture/pipeline-state.json" ]; then
     jq '.stages.architecture.status = "completed" | .stages.architecture.last_step = "idempotent_skip" | .updated_at = (now | todate)' \
-       "Pillar-Content-Architecture/.pipeline-state.json" > /tmp/ps.tmp && mv /tmp/ps.tmp "Pillar-Content-Architecture/.pipeline-state.json"
+       "Pillar-Content-Architecture/pipeline-state.json" > /tmp/ps.tmp && mv /tmp/ps.tmp "Pillar-Content-Architecture/pipeline-state.json"
   fi
   echo "Initialisation successful (already initialised)."
   exit 0
@@ -73,9 +73,9 @@ done
 
 ```bash
 touch "Pillar-Content-Architecture/.architecture-done"
-if [ -f "Pillar-Content-Architecture/.pipeline-state.json" ]; then
+if [ -f "Pillar-Content-Architecture/pipeline-state.json" ]; then
   jq '.stages.architecture.status = "completed" | .stages.architecture.last_step = "clone_verified" | .updated_at = (now | todate)' \
-     "Pillar-Content-Architecture/.pipeline-state.json" > /tmp/ps.tmp && mv /tmp/ps.tmp "Pillar-Content-Architecture/.pipeline-state.json"
+     "Pillar-Content-Architecture/pipeline-state.json" > /tmp/ps.tmp && mv /tmp/ps.tmp "Pillar-Content-Architecture/pipeline-state.json"
 fi
 echo "Initialisation successful."
 ```
