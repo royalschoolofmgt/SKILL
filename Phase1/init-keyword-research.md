@@ -78,16 +78,14 @@ Always read `cdp_ws` fresh from config.json — never hardcode the WebSocket URL
 export PATH="$PATH:/home/saasvortex/.npm-global/bin"
 CDP=$(jq -r '.cdp_ws' config.json)
 
-# List all open tabs
-agent-browser --cdp "$CDP" tab
-
-# Close every tab above index 1 in sequence
-# agent-browser --cdp "$CDP" tab close 2
-# agent-browser --cdp "$CDP" tab close 3
-# (repeat until only 1 tab remains)
+TAB_COUNT=$(agent-browser --cdp "$CDP" tab | grep -cE '^\s*\[?[0-9]+')
+if [ "$TAB_COUNT" -gt 1 ]; then
+  for i in $(seq "$TAB_COUNT" -1 2); do
+    agent-browser --cdp "$CDP" tab close "$i" || true
+  done
+fi
+agent-browser --cdp "$CDP" tab 1
 ```
-
-Run `tab` first to see the count, then close each one above index 1.
 
 ### Step 4 — Verify connection AND Google Ads access
 
@@ -136,7 +134,7 @@ Also read all four deliverables:
 
 ---
 
-## PHASE 2 — Create TodoList
+## PHASE 1.5 — Create TodoList
 
 Using the TodoWrite tool, create a granular todo list:
 
@@ -194,15 +192,12 @@ Run this at the start of **every** batch, not just the first:
 export PATH="$PATH:/home/saasvortex/.npm-global/bin"
 CDP=$(jq -r '.cdp_ws' config.json)
 
-# List all open tabs
-agent-browser --cdp "$CDP" tab
-
-# Close every tab above index 1 in sequence
-agent-browser --cdp "$CDP" tab close 2
-# agent-browser --cdp "$CDP" tab close 3
-# (repeat until only tab 1 remains)
-
-# Switch to tab 1 to confirm it is active
+TAB_COUNT=$(agent-browser --cdp "$CDP" tab | grep -cE '^\s*\[?[0-9]+')
+if [ "$TAB_COUNT" -gt 1 ]; then
+  for i in $(seq "$TAB_COUNT" -1 2); do
+    agent-browser --cdp "$CDP" tab close "$i" || true
+  done
+fi
 agent-browser --cdp "$CDP" tab 1
 ```
 
@@ -244,9 +239,19 @@ agent-browser --cdp "$CDP" screenshot --output Step-4-Keyword-Research/screensho
 - Click the download/export button in Keyword Planner
 - Save to `Step-4-Keyword-Research/batches/batch-NNN.csv`
 
-If the browser saves to a default downloads location, move it:
+If the browser saves to a default downloads location, move the most recent matching file (avoids picking up leftovers from prior failed batches):
 ```bash
-mv ~/Downloads/keyword_ideas*.csv Step-4-Keyword-Research/batches/batch-NNN.csv
+LATEST=$(ls -t ~/Downloads/keyword_ideas*.csv 2>/dev/null | head -n 1)
+if [ -n "$LATEST" ]; then
+  mv "$LATEST" Step-4-Keyword-Research/batches/batch-NNN.csv
+else
+  echo "ERROR: no keyword_ideas*.csv found in ~/Downloads for batch NNN"
+fi
+```
+
+Before starting the next batch, also clear stale downloads to keep the picker deterministic:
+```bash
+rm -f ~/Downloads/keyword_ideas*.csv
 ```
 
 Final screenshot confirming export:
@@ -357,3 +362,11 @@ Mark Step 4 as complete in the progress tracker.
 ### 5.3 Update seo-domination-report.html
 
 Read `config.json`. Do a full `{{PLACEHOLDER}}` replacement pass on `seo-domination-report.html` using the `template_vars` mapping. Write the updated file back to disk.
+
+### 5.4 Completion Marker
+
+After all of the above succeeds, write a marker so the orchestrator knows this skill finished:
+
+```bash
+touch .keyword-research-done
+```

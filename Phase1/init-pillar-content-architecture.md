@@ -13,21 +13,38 @@ Clones the SEO Domination Engine template from `royalschoolofmgt/pillar-content-
 
 ## Steps
 
-**1. Clone the template**
+**1. Idempotency check**
+
+If `Pillar-Content-Architecture/Content-Creation-Workflow/Master-Matrix.md` already exists, skip cloning. Tell the user: "Workspace already initialised — skipping clone." Then write the completion marker (step 4) and exit.
+
+```bash
+if [ -f "Pillar-Content-Architecture/Content-Creation-Workflow/Master-Matrix.md" ]; then
+  mkdir -p "Pillar-Content-Architecture/Content-Creation-Workflow"
+  touch "Pillar-Content-Architecture/Content-Creation-Workflow/.architecture-done"
+  echo "Initialisation successful (already initialised)."
+  exit 0
+fi
+```
+
+**2. Clone the template**
 
 ```bash
 gh repo clone royalschoolofmgt/pillar-content-creation-skill "Pillar-Content-Architecture" -- --depth=1
 ```
 
-**2. Strip git history**
+**3. Strip git history**
 
 ```bash
 rm -rf "Pillar-Content-Architecture/.git"
 ```
 
-This makes the folder a clean local copy with no remote link.
+**4. Write completion marker**
 
-**3. Done**
+```bash
+touch "Pillar-Content-Architecture/Content-Creation-Workflow/.architecture-done"
+```
+
+**5. Done**
 
 Tell the user: "Initialisation successful."
 

@@ -90,16 +90,15 @@ Always read `cdp_ws` fresh from `config.json` at the start of each phase — nev
 List all open tabs and close all but the first using agent-browser:
 
 ```bash
-# List current tabs
-agent-browser --cdp "$WS_URL" tab
-
-# Close all tabs except tab 1 — repeat for however many tabs are open
-# agent-browser --cdp "$WS_URL" tab close 2
-# agent-browser --cdp "$WS_URL" tab close 3
-# (continue until only 1 tab remains)
+# Count open tabs, then close every tab above index 1 in descending order
+TAB_COUNT=$(agent-browser --cdp "$WS_URL" tab | grep -cE '^\s*\[?[0-9]+')
+if [ "$TAB_COUNT" -gt 1 ]; then
+  for i in $(seq "$TAB_COUNT" -1 2); do
+    agent-browser --cdp "$WS_URL" tab close "$i" || true
+  done
+fi
+agent-browser --cdp "$WS_URL" tab 1
 ```
-
-Run `agent-browser --cdp "$WS_URL" tab` first to see how many tabs are open, then close each one above index 1 in sequence.
 
 **Step 4 — Verify connection**
 
@@ -226,6 +225,16 @@ Read `seo-domination-report.html`.
 Replace every `{{PLACEHOLDER}}` variable in the HTML with the corresponding value from config.json, using the `template_vars` mapping in config.json as the reference. Do a full replacement pass — every variable, not just the ones changed in this run.
 
 Write the updated HTML back to `seo-domination-report.html`.
+
+---
+
+## PHASE 4b — Completion Marker
+
+After the HTML update succeeds, write a marker so the orchestrator knows this skill finished:
+
+```bash
+touch .analysis-done
+```
 
 ---
 
