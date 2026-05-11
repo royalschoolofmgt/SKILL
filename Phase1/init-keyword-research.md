@@ -1,0 +1,487 @@
+---
+name: init-keyword-research
+description: "SEO Domination Engine Step 4: Keyword Research. Validates Steps 1-3b are complete, checks CDP connection, reads Step-4 Steps.md, generates batch seed keywords from previous deliverables, runs Google Keyword Planner batches via agent-browser, exports CSVs, loops until keyword target is met, consolidates all keywords into master CSV, shortlists best keywords, and writes summary.md. Must be run from inside Pillar-Content-Architecture/. Triggers: 'init keyword research', 'run keyword research', 'keyword research', 'step 4', 'keyword planner', 'run kp batches', 'start keyword research'."
+---
+
+# Init Keyword Research (Step 4)
+
+## Prerequisites
+
+Must be run from inside `Pillar-Content-Architecture/`.
+
+---
+
+## AUTOPILOT RULES — READ FIRST
+
+- **Sequential browser, single CDP.** Only one Chrome instance is connected via CDP. **Never** issue parallel `agent-browser` calls. Never spawn parallel subagents that touch the browser. Every batch (and every step within a batch) is serialised: one operation, await, next.
+- **Never stop or pause after Phase 0.** No questions to the user mid-run.
+- **Never skip a phase.** Complete every phase and sub-step in order.
+- **State JSON is truth.** After every micro-step (each batch, each phase sub-section), update `pipeline-state.json` with `stages.keyword_research.last_step = "<phase>.<substep>"` and `stages.keyword_research.batches_done = N`. Resume reads this. See "State JSON updates" below.
+- **Hard cap: 20 batches total across the entire run.** Never exceed 20 KP batches no matter what `total_keywords_to_research` says. If 20 batches are done and the target is still unmet, stop the loop, log "BATCH_CAP_REACHED" in `pipeline-state.json`, proceed to Phase 4 with whatever was collected. This cap is non-negotiable.
+- **Loop batches in iterations.** Each iteration is 6–10 batches (max 10 per iteration). After each iteration, check the cap **and** the keyword target. Stop on whichever is hit first.
+- **Self-learning between iterations (calibration gate).** After every iteration (and after the very first 2–3 batches), score the harvest before launching the next iteration. If quality is poor, recalibrate seeds before continuing. See "PHASE 3d — Calibration Gate" below.
+- **Self-heal on failure.** If a tool call fails, retry once silently. If it still fails, consult the `agent-browser` skill for fallback recovery before giving up. If recovery succeeds, continue. If browser-related and recovery fails → hard stop.
+- **agent-browser is the only hard stop.** If CDP fails at any point, tell the user: "agent-browser connection failed — cannot continue. Please check the CDP endpoint and try again." Then stop.
+- **Do not summarise phases.** Just do the work and mark todos complete.
+- **Snapshot first, screenshot second.** Use `agent-browser snapshot` as primary; screenshot only if snapshot is insufficient.
+
+## State JSON updates (after every micro-step)
+
+After each numbered sub-step or each completed batch, run:
+
+```bash
+jq --arg step "<phase>.<substep>" --argjson n <batch_number> \
+   '.stages.keyword_research.last_step = $step
+    | .stages.keyword_research.batches_done = $n
+    | .stages.keyword_research.status = "in_progress"
+    | .updated_at = (now | todate)' \
+   pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp pipeline-state.json
+```
+
+On Phase 5.4 completion, set `status = "completed"`.
+
+---
+
+## PHASE -1 — Prerequisite Check
+
+Check that all four deliverables from Steps 1–3b exist and are non-empty:
+
+```bash
+test -s Step-1-Brand-Discovery/brand-discovery.md && echo "Step 1 OK" || echo "MISSING: brand-discovery.md"
+test -s Step-2-Competitor-Discovery/competitor-discovery.md && echo "Step 2 OK" || echo "MISSING: competitor-discovery.md"
+test -s Step-3-Content-Gap-Analysis/content-gap-analysis.md && echo "Step 3 OK" || echo "MISSING: content-gap-analysis.md"
+test -s Step-3b-Content-Scope-Estimation/scope-estimation.md && echo "Step 3b OK" || echo "MISSING: scope-estimation.md"
+```
+
+If any file is missing → tell the user exactly which step is incomplete and stop. Do not proceed.
+
+If all four exist → continue.
+
+---
+
+## PHASE 0 — CDP Check & Cleanup
+
+### Step 1 — Derive WebSocket URL
+
+```bash
+export PATH="$PATH:/home/saasvortex/.npm-global/bin"
+CDP_HTTP=$(jq -r '.cdp_http' config.json)
+CDP_HOST=$(echo "$CDP_HTTP" | sed 's|https://||')
+WS_URL=$(curl -s "$CDP_HTTP/json/version" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+print(data['webSocketDebuggerUrl'].replace('ws://localhost', 'wss://$CDP_HOST'))
+")
+echo "WebSocket URL: $WS_URL"
+```
+
+### Step 2 — Write cdp_ws to config.json
+
+```bash
+jq --arg ws "$WS_URL" '.cdp_ws = $ws' config.json > config.tmp && mv config.tmp config.json
+```
+
+All subsequent agent-browser calls use:
+
+```bash
+export PATH="$PATH:/home/saasvortex/.npm-global/bin"
+CDP=$(jq -r '.cdp_ws' config.json)
+agent-browser --cdp "$CDP" <command>
+```
+
+Always read `cdp_ws` fresh from config.json — never hardcode the WebSocket URL.
+
+### Step 3 — Close all tabs except one
+
+```bash
+export PATH="$PATH:/home/saasvortex/.npm-global/bin"
+CDP=$(jq -r '.cdp_ws' config.json)
+
+TAB_COUNT=$(agent-browser --cdp "$CDP" tab | grep -cE '^\s*\[?[0-9]+')
+if [ "$TAB_COUNT" -gt 1 ]; then
+  for i in $(seq "$TAB_COUNT" -1 2); do
+    agent-browser --cdp "$CDP" tab close "$i" || true
+  done
+fi
+agent-browser --cdp "$CDP" tab 1
+```
+
+### Step 4 — Verify connection AND Google Ads access
+
+Read the Keyword Planner URL from config.json and open it:
+
+```bash
+export PATH="$PATH:/home/saasvortex/.npm-global/bin"
+CDP=$(jq -r '.cdp_ws' config.json)
+KP_URL=$(jq -r '.agent_browser.keyword_planner_url' config.json)
+
+# Open Keyword Planner home to verify both browser access and Ads account access
+agent-browser --cdp "$CDP" open "$KP_URL"
+```
+
+Take a snapshot to check the page loaded correctly (snapshot first):
+```bash
+agent-browser --cdp "$CDP" snapshot
+```
+
+If the snapshot shows the Keyword Planner UI → access confirmed, continue.
+If the snapshot shows a login page, error, or access denied → hard stop. Tell the user: "Cannot access Google Keyword Planner — check that the CDP browser is logged into the correct Google Ads account (authuser=1, customer ID 7937773813)." Then stop.
+
+Take a screenshot for the record:
+```bash
+agent-browser --cdp "$CDP" screenshot --output Step-4-Keyword-Research/screenshots/cdp-kp-access-check.png
+```
+
+---
+
+## PHASE 1 — Read Steps.md & Load Config
+
+Read `Step-4-Keyword-Research/Steps.md` fully and internalize every phase and sub-step.
+
+Then read these values from `config.json`:
+- `scope.total_keywords_to_research` — the keyword target to hit
+- `scope.kp_batches` — planned number of batches
+- `brand_name` — for context
+- `target_markets` — for geo targeting in Keyword Planner
+- `website_url` — for context
+
+Also read all four deliverables:
+- `Step-1-Brand-Discovery/brand-discovery.md`
+- `Step-2-Competitor-Discovery/competitor-discovery.md`
+- `Step-3-Content-Gap-Analysis/content-gap-analysis.md`
+- `Step-3b-Content-Scope-Estimation/scope-estimation.md`
+
+---
+
+## PHASE 1.5 — Create TodoList
+
+Using the TodoWrite tool, create a granular todo list:
+
+- PHASE -1: Prerequisite check
+- PHASE 0: CDP check, tab cleanup, connection verify
+- PHASE 1: Read Steps.md, load config, read deliverables
+- PHASE 2: Generate batch seeds
+- PHASE 3: For each batch — open KP, enter seeds, export CSV, save file
+- PHASE 3b: Quality check after each batch — count, relevance, volume
+- PHASE 3c: Generate new batch if target not met, repeat
+- PHASE 4: Consolidate all batch CSVs into master-keywords.csv
+- PHASE 4b: Shortlist best keywords into shortlisted-keywords.csv
+- PHASE 5: Write summary.md, update Master-Matrix.md, update HTML
+
+---
+
+## PHASE 2 — Generate Batch Seeds
+
+Using the four deliverables as input, derive seed keyword batches:
+
+**Rules:**
+- 2–3 keywords per batch (hard limit — never more than 3)
+- Each keyword must be directly relevant to the client's products or content pillars
+- Keywords should cover different pillars/product categories across batches
+- Assign a `product_category` label to each batch based on which client product area the seeds target
+- Plan enough batches to realistically hit `scope.total_keywords_to_research`
+
+**Output:** A numbered batch plan, e.g.:
+```
+Batch 001 — product_category: [category] — seeds: [kw1, kw2]
+Batch 002 — product_category: [category] — seeds: [kw1, kw2, kw3]
+...
+```
+
+Create `Step-4-Keyword-Research/batches/` directory if it doesn't exist.
+
+---
+
+## PHASE 3 — Run Batches in Google Keyword Planner
+
+At the start of every batch, always read `cdp_ws` fresh from config.json — never hardcode the WebSocket URL:
+
+```bash
+export PATH="$PATH:/home/saasvortex/.npm-global/bin"
+CDP=$(jq -r '.cdp_ws' config.json)
+```
+
+Use `$CDP` in every agent-browser call throughout this phase.
+
+### 3.0 Tab cleanup before each batch
+
+Run this at the start of **every** batch, not just the first:
+
+```bash
+export PATH="$PATH:/home/saasvortex/.npm-global/bin"
+CDP=$(jq -r '.cdp_ws' config.json)
+
+TAB_COUNT=$(agent-browser --cdp "$CDP" tab | grep -cE '^\s*\[?[0-9]+')
+if [ "$TAB_COUNT" -gt 1 ]; then
+  for i in $(seq "$TAB_COUNT" -1 2); do
+    agent-browser --cdp "$CDP" tab close "$i" || true
+  done
+fi
+agent-browser --cdp "$CDP" tab 1
+```
+
+### 3.1 Navigate to Keyword Planner
+
+Read the ideas URL from config.json — never hardcode it:
+
+```bash
+export PATH="$PATH:/home/saasvortex/.npm-global/bin"
+CDP=$(jq -r '.cdp_ws' config.json)
+KP_IDEAS_URL=$(jq -r '.agent_browser.keyword_planner_ideas_url' config.json)
+agent-browser --cdp "$CDP" open "$KP_IDEAS_URL"
+```
+
+Snapshot first to confirm the page loaded and identify the input field:
+```bash
+agent-browser --cdp "$CDP" snapshot
+```
+
+Then screenshot for the record:
+```bash
+agent-browser --cdp "$CDP" screenshot --output Step-4-Keyword-Research/screenshots/batch-NNN-open.png
+```
+
+### 3.2 Enter seed keywords
+
+- Click into the keyword input field
+- Type the 2–3 seed keywords for this batch (one per line or comma-separated)
+- Set location/geo targeting to match `target_markets` from config.json
+- Click "Get results"
+
+Screenshot after results load:
+```bash
+agent-browser --cdp "$CDP" screenshot --output Step-4-Keyword-Research/screenshots/batch-NNN-results.png
+```
+
+### 3.3 Export CSV
+
+- Click the download/export button in Keyword Planner
+- Save to `Step-4-Keyword-Research/batches/batch-NNN.csv`
+
+If the browser saves to a default downloads location, move the most recent matching file (avoids picking up leftovers from prior failed batches):
+```bash
+LATEST=$(ls -t ~/Downloads/keyword_ideas*.csv 2>/dev/null | head -n 1)
+if [ -n "$LATEST" ]; then
+  mv "$LATEST" Step-4-Keyword-Research/batches/batch-NNN.csv
+else
+  echo "ERROR: no keyword_ideas*.csv found in ~/Downloads for batch NNN"
+fi
+```
+
+Before starting the next batch, also clear stale downloads to keep the picker deterministic:
+```bash
+rm -f ~/Downloads/keyword_ideas*.csv
+```
+
+Final screenshot confirming export:
+```bash
+agent-browser --cdp "$CDP" screenshot --output Step-4-Keyword-Research/screenshots/batch-NNN-exported.png
+```
+
+---
+
+## PHASE 3b — Quality Check After Each Batch
+
+After each batch CSV is saved:
+
+1. Count the keywords in the batch file
+2. Sum the running total of keywords collected across all batches so far
+3. Check relevance: are the returned keywords on-topic for the client's products/pillars?
+4. Check volume: are avg_monthly_searches values meaningful (not all zeros)?
+
+**Decision:**
+- If `running_total >= total_keywords_to_research` AND quality is acceptable → proceed to Phase 4
+- If `running_total < total_keywords_to_research` OR quality is poor → go to Phase 3c
+
+---
+
+## PHASE 3c — Generate New Batch If Needed
+
+Before generating any new batch, check the **hard cap**:
+
+```bash
+BATCHES_DONE=$(jq -r '.stages.keyword_research.batches_done' pipeline-state.json)
+if [ "$BATCHES_DONE" -ge 20 ]; then
+  jq '.stages.keyword_research.last_step = "BATCH_CAP_REACHED"' \
+     pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp pipeline-state.json
+  echo "Hard cap of 20 batches reached. Proceeding to Phase 4 with collected data."
+  # Skip directly to PHASE 4
+fi
+```
+
+If `BATCHES_DONE < 20` AND target not met:
+1. Generate a new batch of 2–3 seed keywords — use different seeds than previous batches, targeting unexplored pillars or product categories.
+2. Increment the batch number.
+3. Return to Phase 3 and run the new batch.
+4. Repeat Phase 3b quality check.
+
+Continue until **either** `total_keywords_to_research` is met **or** `batches_done == 20` (whichever comes first).
+
+---
+
+## PHASE 3d — Calibration Gate (self-learning)
+
+Run this gate after **batch 3** (initial calibration) and after **every iteration** (every 6–10 batches). Purpose: detect if the seed keywords are off-target before wasting more batches.
+
+### 3d.1 Score the harvest so far
+
+Compute these signals from all batch CSVs collected so far:
+
+```bash
+# Concatenate all batch CSVs (skipping headers)
+ALL=$(tail -q -n +2 Step-4-Keyword-Research/batches/batch-*.csv 2>/dev/null)
+
+# 1. Total keywords
+TOTAL=$(echo "$ALL" | wc -l)
+
+# 2. Zero-volume rate (keywords with avg_monthly_searches = 0)
+ZERO=$(echo "$ALL" | awk -F, '$3==0 || $3=="" {n++} END {print n+0}')
+ZERO_RATE=$(awk -v z="$ZERO" -v t="$TOTAL" 'BEGIN {if (t>0) print z/t; else print 1}')
+
+# 3. High-competition rate
+HIGH=$(echo "$ALL" | awk -F, 'tolower($5)=="high" {n++} END {print n+0}')
+HIGH_RATE=$(awk -v h="$HIGH" -v t="$TOTAL" 'BEGIN {if (t>0) print h/t; else print 0}')
+
+# 4. Median avg_monthly_searches
+MEDIAN=$(echo "$ALL" | awk -F, '$3>0 {print $3}' | sort -n | awk '{a[NR]=$1} END {if (NR==0) print 0; else if (NR%2==1) print a[(NR+1)/2]; else print (a[NR/2]+a[NR/2+1])/2}')
+
+# 5. Relevance density — what fraction of keywords contain a brand/product term from the seed pool
+SEEDS=$(jq -r '.seed_keywords_used[]?' pipeline-state.json | tr '\n' '|' | sed 's/|$//')
+if [ -n "$SEEDS" ]; then
+  RELEVANT=$(echo "$ALL" | awk -F, -v p="$SEEDS" 'BEGIN{IGNORECASE=1} tolower($2) ~ tolower(p) {n++} END{print n+0}')
+  RELEVANCE=$(awk -v r="$RELEVANT" -v t="$TOTAL" 'BEGIN {if (t>0) print r/t; else print 0}')
+else
+  RELEVANCE=1
+fi
+```
+
+### 3d.2 Apply pass/fail thresholds
+
+| Signal | Pass | Soft fail (recalibrate) | Hard fail (stop) |
+|---|---|---|---|
+| Zero-volume rate | < 0.40 | 0.40–0.70 | > 0.70 |
+| High-competition rate | < 0.60 | 0.60–0.85 | > 0.85 |
+| Median volume | ≥ 100 | 30–100 | < 30 |
+| Relevance density | ≥ 0.50 | 0.20–0.50 | < 0.20 |
+
+- **All four pass** → continue to next iteration with the existing seed strategy.
+- **Any soft fail** → recalibrate (3d.3) before next iteration.
+- **Any hard fail twice in a row** → stop the loop, log `CALIBRATION_HARD_FAIL` in state JSON, proceed to Phase 4 with what's been collected. (Hard cap of 20 still applies regardless.)
+
+### 3d.3 Recalibration (when soft-failing)
+
+Persist the current scores and seeds into `pipeline-state.json`, then **change** the seed strategy for the next iteration based on which signal failed:
+
+```bash
+jq --argjson scores "{\"zero_rate\":$ZERO_RATE,\"high_rate\":$HIGH_RATE,\"median\":$MEDIAN,\"relevance\":$RELEVANCE}" \
+   --argjson n "$TOTAL" \
+   '.stages.keyword_research.calibration = (.stages.keyword_research.calibration // []) + [{
+      after_batch: .stages.keyword_research.batches_done,
+      total_keywords: $n,
+      scores: $scores,
+      timestamp: (now | todate)
+    }]' \
+   pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp pipeline-state.json
+```
+
+Recalibration rules (apply all that match):
+
+| Failed signal | Recalibration action |
+|---|---|
+| **High zero-volume rate** | Drop overly-niche or branded seeds. Replace with broader, head-term seeds from the pillar (e.g. "vape kits" instead of "<brand-name> starter pen"). |
+| **High competition rate** | Switch to long-tail modifiers: prepend "best", "for beginners", "under £50", "guide", "vs", "review". Avoid generic head terms. |
+| **Low median volume** | Pivot to category-level head terms with informational intent ("how to", "what is"). |
+| **Low relevance density** | The KP is suggesting off-topic neighbours. Tighten seeds to use 2–3 word phrases that include a product noun + qualifier; avoid single-word seeds. Re-read `Step-1-Brand-Discovery/brand-discovery.md` and `Step-3-Content-Gap-Analysis/content-gap-analysis.md` to anchor the next seeds in confirmed brand vocabulary. |
+
+After recalibration, update `seed_keywords_used` in state JSON with the new seeds, then start the next iteration (still subject to the 20-batch cap).
+
+### 3d.4 First-pass calibration after batch 3
+
+After exactly the **third** batch (regardless of whether an iteration is "done"), run 3d.1 and 3d.2 once. This is the early warning — it catches catastrophically wrong seed direction before a whole iteration is wasted. Apply the same pass/recalibrate/stop logic.
+
+---
+
+## PHASE 4 — Consolidate Into Master CSV
+
+Merge all `Step-4-Keyword-Research/batches/batch-NNN.csv` files into a single master CSV.
+
+Output file: `Step-4-Keyword-Research/master-keywords.csv`
+
+Columns (in this exact order):
+```
+id,keyword,avg_monthly_searches,volume,competition_label,competition_index,kd,kd_level,three_month_change,yoy_change,trend_growth,intent,priority,product_category,score,bid_low,bid_high,source,geo
+```
+
+**Column mapping from Keyword Planner CSV:**
+- `id` → sequential integer starting at 1
+- `keyword` → Keyword (by relevance)
+- `avg_monthly_searches` → Avg. monthly searches
+- `volume` → same as avg_monthly_searches
+- `competition_label` → Competition (Low / Medium / High)
+- `competition_index` → Competition (indexed value)
+- `kd` → leave blank
+- `kd_level` → leave blank
+- `three_month_change` → Three month change
+- `yoy_change` → YoY change
+- `trend_growth` → derive from yoy_change (positive/flat/negative)
+- `intent` → leave blank
+- `priority` → derive: High if avg_monthly_searches > 1000 and competition_label = Low or Medium; Medium if searches > 200; Low otherwise
+- `product_category` → from the batch this keyword came from
+- `score` → leave blank
+- `bid_low` → Top of page bid (low range)
+- `bid_high` → Top of page bid (high range)
+- `source` → "Google Keyword Planner"
+- `geo` → target_markets from config.json (comma-separated if multiple)
+
+Remove duplicate keywords (keep the entry with the highest avg_monthly_searches).
+
+---
+
+## PHASE 4b — Shortlist Keywords
+
+From `master-keywords.csv`, select the best keywords based on criteria from `scope-estimation.md` and Step-3b findings.
+
+Shortlisting criteria (apply in order):
+1. Remove keywords with avg_monthly_searches = 0
+2. Prefer Low and Medium competition over High
+3. Prefer keywords with positive or flat trend_growth
+4. Prioritise keywords that map directly to identified content gaps from Step 3
+5. Aim for a spread across all product_categories — don't over-index on one category
+
+Output file: `Step-4-Keyword-Research/shortlisted-keywords.csv`
+
+Use the same column structure as master-keywords.csv.
+
+---
+
+## PHASE 5 — Wrap Up
+
+### 5.1 Write summary.md
+
+Write `Step-4-Keyword-Research/summary.md` covering:
+- Total keywords collected across all batches
+- Number of batches run
+- Total keywords in master CSV (after deduplication)
+- Total keywords in shortlisted CSV
+- Top 5 keywords by avg_monthly_searches
+- Competition breakdown (how many Low / Medium / High)
+- Product category coverage
+- Key observations and recommendations for Step 5 (Pillar Architecture)
+
+### 5.2 Update Master-Matrix.md
+
+Mark Step 4 as complete in the progress tracker.
+
+### 5.3 Update seo-domination-report.html
+
+Read `config.json`. Do a full `{{PLACEHOLDER}}` replacement pass on `seo-domination-report.html` using the `template_vars` mapping. Write the updated file back to disk.
+
+### 5.4 Completion Marker
+
+After all of the above succeeds, write the marker AND finalise state JSON:
+
+```bash
+touch .keyword-research-done
+jq '.stages.keyword_research.status = "completed" | .stages.keyword_research.last_step = "5.4" | .updated_at = (now | todate)' \
+   pipeline-state.json > /tmp/ps.tmp && mv /tmp/ps.tmp pipeline-state.json
+```
