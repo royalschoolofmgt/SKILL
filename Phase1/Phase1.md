@@ -23,11 +23,13 @@ Phase1/
 ## ABSOLUTE RULES (read before every invocation)
 
 1. **Single CDP, sequential only.** One Chrome instance via CDP. Never issue parallel `agent-browser` calls. Never spawn parallel subagents that touch the browser. Every browser operation across every stage is serialised.
+1a. **`--cdp` on every agent-browser call. `connect` is forbidden.** The mandatory shape everywhere is `agent-browser --cdp "$CDP" <cmd>`. Never use `agent-browser connect "$CDP"` followed by bare `agent-browser <cmd>` calls — that persistent-session mode fails against the VortexIQ proxy with `ERR_INVALID_AUTH_CREDENTIALS`. See `agent-browser` skill Rule 2 + "Why per-call --cdp is mandatory" section. If any child stage's snippet omits `--cdp`, treat it as a bug.
+1b. **Do not call `agent-browser doctor` or `agent-browser close`.** `doctor` is not in v0.23.x. `close` is forbidden against the shared remote. Reachability test = `agent-browser --cdp "$CDP" get url`. Per-tab close = `agent-browser --cdp "$CDP" tab close <n>`.
 2. **State JSON is truth.** `pipeline-state.json` (in workspace root) is updated after every micro-step. On resume, read it first and continue from `last_step`. Never trust in-memory state across runs.
 3. **One-shot question phase.** Ask the user the 3 inputs (Section 1) once. After that, never ask anything until Phase 1 finishes or hard-stops.
 4. **Resume-first.** On every invocation, read `pipeline-state.json` and the gate files. Skip any stage already `completed`. For any stage `in_progress`, resume from `last_step`.
 5. **Self-heal via `agent-browser` skill.** When a child reports a recoverable browser issue, consult the `agent-browser` skill's recovery decision tree before re-delegating.
-6. **Hard stops only on:** (a) agent-browser CDP failure that recovery can't fix, (b) same micro-step failing twice in a row, (c) missing user input in Section 1.
+6. **Hard stops only on:** (a) agent-browser CDP failure that recovery can't fix, (b) same micro-step failing twice in a row, (c) missing user input in Section 1, (d) Google CAPTCHA on Keyword Planner that survives one back-off + cookie clear (use Hard Stop 2 message from the `agent-browser` skill — KP data is not substitutable with Bing/DDG).
 7. **Two completion artefacts.** Phase 1 is only "done" when **both** exist: `.phase-1-done` AND `Pillar-Content-Architecture/phase-1-deliverable.json` (Section 8).
 
 ---

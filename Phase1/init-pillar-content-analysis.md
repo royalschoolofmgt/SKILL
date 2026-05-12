@@ -14,6 +14,9 @@ This skill MUST be run from inside `Pillar-Content-Architecture/`. The `init-pil
 ## AUTOPILOT RULES — READ FIRST
 
 - **Sequential browser, single CDP.** Only one Chrome instance is connected via CDP. **Never** issue parallel `agent-browser` calls. Never spawn parallel subagents that touch the browser. One operation at a time, await result, then next. This applies to every phase below.
+- **`--cdp` on EVERY agent-browser call. No exceptions.** Never use `agent-browser connect` to establish a persistent session and then drop `--cdp` on the next call — that mode fails against the VortexIQ proxy with `ERR_INVALID_AUTH_CREDENTIALS`. See `agent-browser` skill Rule 2 for the full explanation. The mandatory call shape everywhere in this skill is `agent-browser --cdp "$CDP" <subcommand>`. If any snippet in this file appears to omit `--cdp`, treat it as a typo and add `--cdp "$CDP"` before running.
+- **Do not call `agent-browser doctor`.** It is not available in v0.23.x and returns `Unknown command`. Use `agent-browser --cdp "$CDP" get url` as the reachability test.
+- **Do not call `agent-browser close`.** It is forbidden against the shared remote browser. Use `tab close <n>` for individual tabs.
 - **Never stop or pause after Phase 0.** Do not ask the user any questions mid-run.
 - **Never skip a phase.** Complete every phase and every sub-step in order.
 - **Validate before proceeding.** Before moving to the next step, confirm the deliverable file exists and is non-empty.
@@ -104,25 +107,25 @@ List all open tabs and close all but the first using agent-browser:
 
 ```bash
 # Count open tabs, then close every tab above index 1 in descending order
-TAB_COUNT=$(agent-browser --cdp "$WS_URL" tab | grep -cE '^\s*\[?[0-9]+')
+TAB_COUNT=$(agent-browser --cdp "$CDP" tab | grep -cE '^\s*\[?[0-9]+')
 if [ "$TAB_COUNT" -gt 1 ]; then
   for i in $(seq "$TAB_COUNT" -1 2); do
-    agent-browser --cdp "$WS_URL" tab close "$i" || true
+    agent-browser --cdp "$CDP" tab close "$i" || true
   done
 fi
-agent-browser --cdp "$WS_URL" tab 1
+agent-browser --cdp "$CDP" tab 1
 ```
 
 **Step 4 — Verify connection**
 
-Take a test screenshot to confirm agent-browser is working:
+Confirm agent-browser can reach the remote Chrome over CDP. Use `get url` — NOT `doctor` (not available) and NOT `connect` (forbidden):
 
 ```bash
-agent-browser --cdp "$WS_URL" screenshot --output /tmp/cdp-test.png && echo "CDP OK" || echo "CDP FAIL"
+agent-browser --cdp "$CDP" get url > /tmp/cdp-test.out 2>&1 && echo "CDP OK" || echo "CDP FAIL"
 ```
 
-If result is `CDP FAIL` → tell the user and stop (hard stop, see autopilot rules).
-If result is `CDP OK` → clean up: `rm -f /tmp/cdp-test.png` and continue.
+If result is `CDP FAIL` → consult Recovery A in the `agent-browser` skill (re-derive `cdp_ws`, retry once). If still failing, hard stop using Hard Stop 1 message.
+If result is `CDP OK` → clean up: `rm -f /tmp/cdp-test.out` and continue.
 
 ### 0.4 Read and understand the workflow
 

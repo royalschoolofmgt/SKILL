@@ -12,9 +12,12 @@ Source of truth: https://github.com/vercel-labs/agent-browser (`README.md` is th
 ## ABSOLUTE RULES
 
 1. **Single CDP, sequential only.** Phase 1 connects to **one** Chrome instance via CDP. **Never** issue parallel `agent-browser` calls. **Never** spawn parallel subagents that touch the browser. One command, await result, next command.
-2. **Read `cdp_ws` fresh from `config.json` every time.** Never hardcode the WebSocket URL — it changes when the CDP service restarts.
-3. **Snapshot before acting.** Before any `click`, `type`, `fill`, etc., run `snapshot -i` to get accessibility refs (e.g. `@e1`). Acting on stale or guessed selectors is the #1 cause of failed runs.
-4. **Wait, don't sleep.** Use `wait --load networkidle` or `wait <selector>` instead of fixed `sleep` between actions.
+2. **`--cdp` on EVERY call. No exceptions.** Never use `agent-browser connect` to establish a persistent session and then drop the flag on subsequent commands. That mode silently breaks against the VortexIQ proxy — see "Why per-call --cdp is mandatory" below. Every single `agent-browser` invocation in every Phase 1 skill MUST be of the form `agent-browser --cdp "$CDP" <subcommand>`. If you see a snippet that omits `--cdp`, it is wrong and must be fixed before running.
+3. **Read `cdp_ws` fresh from `config.json` at the start of each phase.** Cache it in a local `$CDP` variable for that phase. Re-derive it (via the procedure in Recovery A) only when a call returns a WebSocket/auth error — re-deriving on every command is wasteful. The URL is stable within a session; it rotates after a CDP service restart or after an `agent-browser close` against the remote.
+4. **Single canonical config key.** The WebSocket URL lives at `cdp_ws` (top-level) in `config.json`. The HTTP discovery URL lives at `cdp_http`. Ignore any other key (e.g. `agent_browser.cdp`) — it's a legacy duplicate.
+5. **Snapshot before acting.** Before any `click`, `type`, `fill`, etc., run `snapshot -i` to get accessibility refs (e.g. `@e1`). Acting on stale or guessed selectors is the #1 cause of failed runs.
+6. **Wait, don't sleep.** Use `wait --load networkidle` or `wait <selector>` instead of fixed `sleep` between actions.
+7. **`close` is FORBIDDEN against the shared remote browser.** `agent-browser close` against the VortexIQ Chrome detaches the local session AND can leave the remote Chrome in an inconsistent tab state. Use `tab close <n>` to remove individual tabs instead. The only place `close` is acceptable is the very end of a phase when the orchestrator explicitly wants a fresh remote session — and even then, prefer `tab close` per-tab.
 
 ---
 
@@ -28,13 +31,50 @@ agent-browser --cdp "$CDP" <subcommand> [args]
 
 `--cdp` accepts either a bare port (`9222`, resolved against `http://localhost:9222/json/version`) or a full `ws://` / `wss://` URL. For Phase 1 we always pass the `wss://chrome-cdp.vortexiq.ai/...` form derived in the bootstrap phase.
 
+### Why per-call `--cdp` is mandatory (and `agent-browser connect` is forbidden)
+
+The upstream `vercel-labs/agent-browser` README presents two modes:
+
+```bash
+# Mode A — per-call (what Phase 1 uses)
+agent-browser --cdp "$WS_URL" snapshot
+
+# Mode B — persistent connect (WHAT PHASE 1 FORBIDS)
+agent-browser connect "$WS_URL"
+agent-browser snapshot         # uses the saved session
+```
+
+**Mode B breaks against the VortexIQ Chrome proxy** because the auth token is carried in the WebSocket URL's query string (`wss://chrome-cdp.vortexiq.ai/devtools/browser/<id>?token=...`). `connect` persists the URL into a local session file, but the auth context does not survive cleanly across separate `agent-browser` processes invoked from bash. The next call reads the saved socket reference, opens a new WebSocket, and the proxy rejects it with:
+
+```
+✗ Navigation failed: net::ERR_INVALID_AUTH_CREDENTIALS
+```
+
+Passing `--cdp "$CDP"` on every call carries the full URL (token included) every time, so the proxy authenticates each request correctly. This is the *only* reliable mode against this proxy.
+
+**Forbidden patterns** — none of these are allowed inside Phase 1 skills:
+
+```bash
+agent-browser connect "$WS_URL"   # FORBIDDEN — persistent mode
+agent-browser snapshot            # FORBIDDEN — implicit-session mode (no --cdp)
+agent-browser tab                 # FORBIDDEN — implicit-session mode
+```
+
+If a Phase 1 skill needs a "verify the browser is reachable" smoke test, do it with an explicit `--cdp` call like:
+
+```bash
+agent-browser --cdp "$CDP" get url || { echo "CDP unreachable"; exit 1; }
+```
+
+Do NOT use `agent-browser doctor` — see the next section.
+
 ---
 
 ## Command surface (grouped)
 
 | Group | Commands | Purpose |
 |---|---|---|
-| **Lifecycle** | `open <url>`, `close`, `connect <port>` | Navigate, attach to existing browser |
+| **Lifecycle** | `open <url>`, ~~`close`~~, ~~`connect <port>`~~ | `open` only. `close` is forbidden (see Rule 7). `connect` is forbidden (see "Why per-call --cdp is mandatory"). |
 | **Tabs/windows/frames** | `tab [new\|close <n>\|<tN>]`, `window new`, `frame <sel\|main>` | Manage tabs and iframes |
 | **Capture** | `snapshot` (a11y tree, flags `-i -c -d -s -u`), `screenshot [path] [--full --annotate]`, `pdf <path>` | Read state of page |
 | **Interaction** | `click`, `dblclick`, `focus`, `type <sel> <text>`, `fill <sel> <text>`, `press <key>`, `keyboard`, `hover`, `select`, `check`, `uncheck`, `scroll`, `scrollintoview`, `drag <src> <tgt>`, `upload <sel> <files>` | Drive the page |
@@ -48,7 +88,7 @@ agent-browser --cdp "$CDP" <subcommand> [args]
 | **Dialogs** | `dialog accept\|dismiss\|status` | Handle alerts/prompts |
 | **Diff** | `diff snapshot\|screenshot\|url` | Detect changes |
 | **Debug** | `trace`, `profiler`, `console`, `errors`, `highlight`, `inspect` | Diagnose problems |
-| **Doctor** | `doctor` | Health-check the CLI itself |
+| ~~Doctor~~ | ~~`doctor`~~ | **Not available in v0.23.x.** Earlier docs reference it; the installed Phase 1 binary returns `Unknown command: doctor`. Do not call it. Use `get url` against the live `$CDP` as the reachability test instead. |
 
 The `batch` command runs multiple subcommands in one invocation — useful for atomic flows (snapshot + click + wait), but **does not** make them parallel; they execute in sequence within one process.
 
@@ -72,9 +112,13 @@ agent-browser --cdp "$CDP" click "@e12"
 
 When `agent-browser` returns a non-zero exit, parse the error and apply the matching recovery in order. Stop at the first one that succeeds.
 
-### A. "Failed to connect to CDP" / WebSocket error
+### A. "Failed to connect to CDP" / `ERR_INVALID_AUTH_CREDENTIALS` / WebSocket error
 
-1. Re-derive `cdp_ws` from scratch (the websocket URL rotates):
+First, **rule out the most common cause**: a missing `--cdp` flag on the failing command. If the command being run is bare `agent-browser <cmd>` without `--cdp "$CDP"`, that's the bug — fix the call site (this skill mandates `--cdp` on every call, see Rule 2). `ERR_INVALID_AUTH_CREDENTIALS` against `wss://chrome-cdp.vortexiq.ai/...` is almost always this.
+
+If `--cdp` is present and the call still fails:
+
+1. Re-derive `cdp_ws` from scratch (the WS URL rotates after a CDP service restart or an `agent-browser close`):
    ```bash
    CDP_HTTP=$(jq -r '.cdp_http' config.json)
    CDP_HOST=$(echo "$CDP_HTTP" | sed 's|https://||')
@@ -82,9 +126,14 @@ When `agent-browser` returns a non-zero exit, parse the error and apply the matc
    import sys, json; d = json.load(sys.stdin)
    print(d['webSocketDebuggerUrl'].replace('ws://localhost', 'wss://$CDP_HOST'))")
    jq --arg ws "$WS_URL" '.cdp_ws = $ws' config.json > /tmp/c.tmp && mv /tmp/c.tmp config.json
+   CDP="$WS_URL"
    ```
-2. Run `agent-browser --cdp "$WS_URL" doctor` to confirm the binary itself is healthy.
-3. Re-issue the failing command with the new `$CDP`.
+2. Reachability test (DO NOT use `doctor` — see command surface table):
+   ```bash
+   agent-browser --cdp "$CDP" get url
+   ```
+   If this prints a URL, CDP is healthy. If it fails, the proxy or remote Chrome is genuinely down.
+3. Re-issue the originally failing command with the refreshed `$CDP`.
 4. If still failing → **hard stop** with the standard "agent-browser connection failed" message.
 
 ### B. Click / type / fill failed (selector or ref)
@@ -152,6 +201,46 @@ When `agent-browser` returns a non-zero exit, parse the error and apply the matc
 1. Re-snapshot.
 2. Use a `find role/text` semantic finder rather than a previously captured `@eN` ref.
 
+### H. Google CAPTCHA / `/sorry/index` / bot challenge
+
+Symptom: a navigation to `google.com/search?...` or `ads.google.com` redirects to `https://www.google.com/sorry/index?...` and the page shows "Our systems have detected unusual traffic from your computer network." This will hit Stage C (Keyword Planner / SERP research) more than anywhere else.
+
+Recovery — in order, stop at first success:
+
+1. **Confirm it's the CAPTCHA wall** (not just a slow page):
+   ```bash
+   URL_NOW=$(agent-browser --cdp "$CDP" get url)
+   echo "$URL_NOW" | grep -qE '/sorry/|/recaptcha/' && echo "CAPTCHA HIT" || echo "Not CAPTCHA"
+   ```
+2. **Back off and retry once** — the proxy IP may rotate or the rate-limit window may pass:
+   ```bash
+   agent-browser --cdp "$CDP" wait 15000
+   agent-browser --cdp "$CDP" open "$ORIGINAL_URL"
+   agent-browser --cdp "$CDP" wait --load networkidle
+   agent-browser --cdp "$CDP" get url   # check we're off /sorry/
+   ```
+3. **Clear cookies & storage scoped to google.com, then retry**:
+   ```bash
+   agent-browser --cdp "$CDP" cookies clear google.com
+   agent-browser --cdp "$CDP" storage local clear
+   agent-browser --cdp "$CDP" open "$ORIGINAL_URL"
+   ```
+4. **Switch search target if the audit allows it.** For brand/competitor research only (not for Keyword Planner — KP has no substitute):
+   - Bing: `https://www.bing.com/search?q=...`
+   - DuckDuckGo HTML: `https://duckduckgo.com/html/?q=...`
+   - Brave Search: `https://search.brave.com/search?q=...`
+5. **If the failing surface is Google Ads / Keyword Planner specifically** (Stage C):
+   - DO NOT switch to a different search engine — KP data is the deliverable, not substitutable.
+   - Take a screenshot of the challenge page for the run log: `screenshot --output Step-4-Keyword-Research/screenshots/captcha-batch-NNN.png`.
+   - Update `pipeline-state.json`: `stages.keyword_research.status = "blocked"`, `last_step = "captcha_at_batch_NNN"`.
+   - **Hard stop** with this exact message — do not retry further, the user must resolve the challenge in their VortexIQ Chrome session manually before resuming:
+     ```
+     Google Keyword Planner blocked by CAPTCHA at batch NNN.
+     Open the VortexIQ Chrome session (https://chrome-cdp.vortexiq.ai), solve the challenge interactively, then re-run Phase 1 — it will resume from this batch.
+     Screenshot: Step-4-Keyword-Research/screenshots/captcha-batch-NNN.png
+     ```
+6. The CAPTCHA recovery counter (`stages.keyword_research.captcha_retries`) increments by 1 each time Recovery H runs. If it reaches 3 within one phase, treat it as a permanent block and hard-stop with the message above regardless of which step triggered it.
+
 ---
 
 ## Things NOT documented in the upstream README
@@ -164,16 +253,38 @@ When `agent-browser` returns a non-zero exit, parse the error and apply the matc
 
 ## When to give up (hard stop)
 
-Hard stop and surface to the user only when **all** apply:
-- A and at least one of B/C have been tried and failed.
-- The same micro-step has failed twice in a row according to `pipeline-state.json`.
-- Doctor (`agent-browser doctor`) reports an issue.
+There are three hard-stop scenarios. Each has its own message — pick the one that matches.
 
-Use this exact message:
+### Hard stop 1 — CDP connection genuinely down
+
+Trigger: Recovery A has been tried fully (including the WS URL re-derivation and `get url` reachability test) and the connection is still failing.
 
 ```
-agent-browser connection failed — cannot continue. Please check the CDP endpoint and try again.
+agent-browser connection failed — cannot continue. Please check the CDP endpoint at https://chrome-cdp.vortexiq.ai and try again.
 Last attempted step: <stages.<X>.last_step from pipeline-state.json>
 ```
 
-Then stop. Do not retry further. Do not delete partial deliverables. The orchestrator will resume from the last recorded step on next invocation.
+### Hard stop 2 — Google CAPTCHA on Keyword Planner
+
+Trigger: Recovery H reached step 5 (KP-specific block) or step 6 (3+ CAPTCHAs in one phase).
+
+```
+Google Keyword Planner blocked by CAPTCHA at batch NNN.
+Open the VortexIQ Chrome session (https://chrome-cdp.vortexiq.ai), solve the challenge interactively, then re-run Phase 1 — it will resume from this batch.
+Screenshot: Step-4-Keyword-Research/screenshots/captcha-batch-NNN.png
+```
+
+### Hard stop 3 — Same micro-step failed twice with non-browser cause
+
+Trigger: a step (not browser-related) has failed twice in a row according to `pipeline-state.json`, and the failure is not recoverable via the tree above.
+
+```
+Phase 1 micro-step <X.Y> failed twice in a row. Manual intervention required.
+Reason: <last error captured>
+```
+
+In all three cases:
+
+- Stop. Do not retry further.
+- Do not delete partial deliverables (screenshots, CSVs, MDs).
+- The orchestrator will resume from the last recorded step on next invocation.

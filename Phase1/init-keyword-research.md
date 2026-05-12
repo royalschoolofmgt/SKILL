@@ -14,6 +14,10 @@ Must be run from inside `Pillar-Content-Architecture/`.
 ## AUTOPILOT RULES — READ FIRST
 
 - **Sequential browser, single CDP.** Only one Chrome instance is connected via CDP. **Never** issue parallel `agent-browser` calls. Never spawn parallel subagents that touch the browser. Every batch (and every step within a batch) is serialised: one operation, await, next.
+- **`--cdp` on EVERY agent-browser call. No exceptions.** Never use `agent-browser connect` to establish a persistent session and drop `--cdp` on the next call — that mode fails against the VortexIQ proxy with `ERR_INVALID_AUTH_CREDENTIALS`. The mandatory shape is `agent-browser --cdp "$CDP" <subcommand>`. See `agent-browser` skill Rule 2 for the explanation.
+- **Do not call `agent-browser doctor`.** It is not available in v0.23.x. Use `agent-browser --cdp "$CDP" get url` as the reachability test.
+- **Do not call `agent-browser close`.** Use `tab close <n>` for individual tabs only.
+- **Google CAPTCHA / `/sorry/index` on Keyword Planner is a HARD STOP, not a soft retry.** If a batch lands on `google.com/sorry/...` or shows a reCAPTCHA challenge, follow Recovery H in the `agent-browser` skill: back off once, clear cookies once, then hard stop using the Hard Stop 2 message. Do NOT switch to Bing/DDG for KP — KP data is not substitutable.
 - **Never stop or pause after Phase 0.** No questions to the user mid-run.
 - **Never skip a phase.** Complete every phase and sub-step in order.
 - **State JSON is truth.** After every micro-step (each batch, each phase sub-section), update `pipeline-state.json` with `stages.keyword_research.last_step = "<phase>.<substep>"` and `stages.keyword_research.batches_done = N`. Resume reads this. See "State JSON updates" below.
